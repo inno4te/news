@@ -52,7 +52,7 @@ button{cursor:pointer;border:none;background:none;font-family:'DM Sans',sans-ser
 
 /* ─── TOPBAR (TICKER) ─────────────────────────────────────────────── */
 .topbar{background:var(--ink);color:#fff;height:32px;display:flex;align-items:center;overflow:hidden;position:relative}
-.topbar-label{background:var(--gold-mid);color:#000;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;padding:0 12px;height:100%;display:flex;align-items:center;shrink-0;white-space:nowrap;z-index:2;position:relative}
+.topbar-label{background:var(--gold-mid);color:#000;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;padding:0 12px;height:100%;display:flex;align-items:center;flex-shrink:0;white-space:nowrap;z-index:2;position:relative}
 .ticker-track{display:flex;overflow:hidden;flex:1}
 .ticker-inner{display:flex;gap:0;animation:ticker 30s linear infinite;white-space:nowrap}
 .ticker-inner:hover{animation-play-state:paused}
@@ -374,7 +374,7 @@ button{cursor:pointer;border:none;background:none;font-family:'DM Sans',sans-ser
 <!-- ═══════════════════════════════════════════════════════════════════
      MARKET TICKER
 ═══════════════════════════════════════════════════════════════════════ -->
-<div class="topbar" role="marquee" aria-label="Live market data">
+<div class="topbar" aria-label="Live market data">
   <div class="topbar-label">Markets</div>
   <div class="ticker-track">
     <div class="ticker-inner" id="tickerInner">
@@ -446,7 +446,9 @@ button{cursor:pointer;border:none;background:none;font-family:'DM Sans',sans-ser
         <div class="cat-row" id="catRow"></div>
 
         <div class="sec-hd">
-          <h2 class="sec-title">Latest stories</h2>
+          <h2 class="sec-title">Latest stories
+            <span id="feedStatus" style="display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:500;font-family:'DM Sans',sans-serif;color:var(--muted)">Sample stories</span>
+          </h2>
           <span class="sec-more" onclick="loadMoreArticles()">Load more →</span>
         </div>
         <div class="art-grid" id="artGrid"></div>
@@ -461,9 +463,7 @@ button{cursor:pointer;border:none;background:none;font-family:'DM Sans',sans-ser
               <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><polyline points="22 7 13.5 15.5 8.5 10.5 2 17"/><polyline points="16 7 22 7 22 13"/></svg>
               Market Snapshot
             </span>
-            <span style="display:flex;align-items:center;gap:5px;font-size:11px;color:#16a34a;font-weight:500">
-              <span class="live-dot"></span>Live
-            </span>
+            <span class="mkt-live-flag" style="display:flex;align-items:center;gap:5px;font-size:11px;color:var(--muted);font-weight:500">Sample data</span>
           </div>
           <div id="marketRows"></div>
           <div style="padding:10px 14px;border-top:1px solid var(--border);background:var(--surface)">
@@ -530,7 +530,7 @@ button{cursor:pointer;border:none;background:none;font-family:'DM Sans',sans-ser
         <div class="widget card" id="catMarket">
           <div class="widget-head">
             <span class="widget-title">Market Snapshot</span>
-            <span style="display:flex;align-items:center;gap:5px;font-size:11px;color:#16a34a;font-weight:500"><span class="live-dot"></span>Live</span>
+            <span class="mkt-live-flag" style="display:flex;align-items:center;gap:5px;font-size:11px;color:var(--muted);font-weight:500">Sample data</span>
           </div>
           <div id="catMarketRows"></div>
         </div>
@@ -798,6 +798,248 @@ const ARTICLES = [
   {id:'a12',title:'Revival Meeting in Brazil Draws 2 Million Attendees Over Three Days',category:'charismatic',source:'Charisma News',time:'12h ago',score:90,summary:'The largest recorded charismatic gathering in South American history saw tens of thousands report healings and conversions.',takeaway:'Spirit-led Christianity continues its explosive growth in Latin America.'},
 ]
 
+/* ═══════════════════════════════════════════════════════════════════
+   LIVE NEWS (Google News RSS per category, via CORS-friendly proxies)
+   Falls back to the bundled sample stories above if all fetches fail.
+═══════════════════════════════════════════════════════════════════════ */
+let liveNewsActive = false
+const SAMPLE_ARTICLES = ARTICLES.slice()
+
+const LIVE_QUERIES = {
+  evangelical:'evangelical church missions',
+  charismatic:'christian revival ministry',
+  technology:'technology breakthrough innovation',
+  health:'medical breakthrough health research',
+  education:'education innovation scholarships',
+  governance:'good governance anti-corruption',
+  sports:'inspiring sports achievement',
+  finance:'fintech markets financial inclusion',
+}
+
+const CORS_PROXIES = [
+  u => 'https://api.allorigins.win/raw?url=' + encodeURIComponent(u),
+  u => 'https://api.codetabs.com/v1/proxy?quest=' + encodeURIComponent(u),
+  u => 'https://corsproxy.io/?url=' + encodeURIComponent(u),
+]
+
+function timeAgo(date) {
+  const s = Math.max(1, Math.floor((Date.now() - date.getTime()) / 1000))
+  if (s < 3600) return Math.floor(s/60) + 'm ago'
+  if (s < 86400) return Math.floor(s/3600) + 'h ago'
+  return Math.floor(s/86400) + 'd ago'
+}
+
+// Stable pseudo positivity score (78–98) derived from the title
+function titleScore(title) {
+  let h = 0
+  for (let i = 0; i < title.length; i++) h = (h * 31 + title.charCodeAt(i)) >>> 0
+  return 78 + (h % 21)
+}
+
+async function fetchWithTimeout(url, ms = 10000) {
+  const ctrl = new AbortController()
+  const t = setTimeout(() => ctrl.abort(), ms)
+  try { return await fetch(url, {signal: ctrl.signal}) }
+  finally { clearTimeout(t) }
+}
+
+async function fetchViaProxy(url) {
+  for (const wrap of CORS_PROXIES) {
+    try {
+      const res = await fetchWithTimeout(wrap(url))
+      if (!res.ok) continue
+      const text = await res.text()
+      if (text.includes('<item>')) return text
+    } catch (e) { /* try next proxy */ }
+  }
+  return null
+}
+
+// Independent fallback: rss2json converts the feed server-side and
+// serves JSON with CORS headers, so it works without any proxy.
+async function fetchViaRss2json(rssUrl, slug) {
+  try {
+    const res = await fetchWithTimeout('https://api.rss2json.com/v1/api.json?rss_url=' + encodeURIComponent(rssUrl))
+    if (!res.ok) return []
+    const j = await res.json()
+    if (j.status !== 'ok' || !Array.isArray(j.items)) return []
+    return j.items.slice(0, 6).map((item, i) => {
+      let title = item.title || ''
+      let source = title.includes(' - ') ? title.split(' - ').pop() : 'News'
+      title = title.replace(/ - [^-]+$/, '').trim()
+      const summary = extractSummary(item.description, title)
+      title = escapeHtml(title)
+      source = escapeHtml(source)
+      const pub = new Date(item.pubDate || Date.now())
+      return {
+        id: `live-${slug}-${i}`,
+        title, category: slug, source,
+        time: timeAgo(pub), _ts: pub.getTime(),
+        score: titleScore(title),
+        summary, takeaway: '',
+        url: item.link || '',
+      }
+    }).filter(a => a.title && a.url)
+  } catch (e) { return [] }
+}
+
+function escapeHtml(s) {
+  return s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))
+}
+
+// Pull a usable text summary out of an RSS description. Google News
+// descriptions are often just the headline as a link — skip those.
+function extractSummary(rawHtml, title) {
+  if (!rawHtml) return ''
+  const div = document.createElement('div')
+  div.innerHTML = rawHtml
+  const text = (div.textContent || '').replace(/\s+/g, ' ').trim()
+  if (text.length < 60) return ''
+  if (text.toLowerCase().startsWith(title.slice(0, 25).toLowerCase())) return ''
+  return escapeHtml(text.length > 220 ? text.slice(0, 217) + '…' : text)
+}
+
+function parseFeed(xmlText, slug) {
+  const doc = new DOMParser().parseFromString(xmlText, 'text/xml')
+  return [...doc.querySelectorAll('item')].slice(0, 6).map((item, i) => {
+    let title = item.querySelector('title')?.textContent || ''
+    let source = item.querySelector('source')?.textContent
+      || (title.includes(' - ') ? title.split(' - ').pop() : 'News')
+    title = title.replace(/ - [^-]+$/, '').trim()
+    const summary = extractSummary(item.querySelector('description')?.textContent, title)
+    title = escapeHtml(title)
+    source = escapeHtml(source)
+    const link = item.querySelector('link')?.textContent || ''
+    const pub = new Date(item.querySelector('pubDate')?.textContent || Date.now())
+    return {
+      id: `live-${slug}-${i}`,
+      title, category: slug, source,
+      time: timeAgo(pub), _ts: pub.getTime(),
+      score: titleScore(title),
+      summary, takeaway: '',
+      url: link,
+    }
+  }).filter(a => a.title && a.url)
+}
+
+let liveNewsLoading = false
+
+async function loadLiveNews() {
+  if (liveNewsLoading || liveNewsActive) return
+  liveNewsLoading = true
+  updateFeedStatus()
+  const results = await Promise.allSettled(
+    Object.entries(LIVE_QUERIES).map(async ([slug, q]) => {
+      const rssUrl = `https://news.google.com/rss/search?q=${encodeURIComponent(q)}&hl=en-US&gl=US&ceid=US:en`
+      const xml = await fetchViaProxy(rssUrl)
+      if (xml) return parseFeed(xml, slug)
+      return fetchViaRss2json(rssUrl, slug)
+    })
+  )
+  liveNewsLoading = false
+  const live = results.flatMap(r => r.status === 'fulfilled' ? r.value : [])
+  if (live.length < 4) {
+    showToast('Live news unavailable — showing sample stories. Click the "Sample stories" label to retry.','info')
+    updateFeedStatus()
+    return
+  }
+  live.sort((a, b) => (b._ts || 0) - (a._ts || 0))
+  // Backfill any category whose feed came back empty with the bundled
+  // sample stories so no section of the site renders blank
+  const covered = new Set(live.map(a => a.category))
+  CATEGORIES.forEach(c => {
+    if (!covered.has(c.slug)) live.push(...SAMPLE_ARTICLES.filter(a => a.category === c.slug))
+  })
+  ARTICLES.splice(0, ARTICLES.length, ...live)
+  liveNewsActive = true
+  // Refresh whatever the user is currently looking at
+  if (currentPage === 'home') renderHome()
+  else if (currentPage === 'category') renderCategory(currentCategory)
+  updateFeedStatus()
+}
+
+function updateFeedStatus() {
+  const el = document.getElementById('feedStatus')
+  if (!el) return
+  if (liveNewsActive) {
+    el.innerHTML = '<span class="live-dot"></span>Live'
+    el.style.color = '#16a34a'
+    el.style.cursor = 'default'
+    el.onclick = null
+    el.title = ''
+  } else if (liveNewsLoading) {
+    el.textContent = 'Loading live news…'
+    el.style.color = 'var(--muted)'
+    el.style.cursor = 'default'
+    el.onclick = null
+  } else {
+    el.innerHTML = 'Sample stories · <u>retry live</u>'
+    el.style.color = 'var(--muted)'
+    el.style.cursor = 'pointer'
+    el.title = 'Click to retry loading live news'
+    el.onclick = loadLiveNews
+  }
+}
+
+/* ─── LIVE MARKET DATA (Yahoo Finance charts via the same proxies) ── */
+const YAHOO_SYMBOLS = {SPY:'SPY', QQQ:'QQQ', BTC:'BTC-USD', GLD:'GLD'}
+let marketsLive = false
+
+async function fetchYahooChart(sym) {
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${sym}?range=1mo&interval=1d`
+  for (const wrap of CORS_PROXIES) {
+    try {
+      const res = await fetchWithTimeout(wrap(url))
+      if (!res.ok) continue
+      const j = JSON.parse(await res.text())
+      const r = j?.chart?.result?.[0]
+      if (r?.meta) return r
+    } catch (e) { /* try next proxy */ }
+  }
+  return null
+}
+
+async function loadLiveMarkets() {
+  const results = await Promise.allSettled(MARKETS.map(async m => {
+    const r = await fetchYahooChart(YAHOO_SYMBOLS[m.sym])
+    if (!r) return false
+    const closes = (r.indicators?.quote?.[0]?.close || []).filter(v => typeof v === 'number')
+    const price = r.meta.regularMarketPrice ?? closes[closes.length - 1]
+    if (!price || closes.length < 2) return false
+    // Last close usually IS the current price during/after today's session,
+    // so compare against the close before it for the daily change
+    const last = closes[closes.length - 1]
+    const prev = Math.abs(last - price) < price * 0.001 ? closes[closes.length - 2] : last
+    m.price = +price.toFixed(2)
+    m.chg = +(((price - prev) / prev) * 100).toFixed(2)
+    MARKET_HISTORY[m.sym] = closes.slice(-12).map(v => +v.toFixed(2))
+    return true
+  }))
+  marketsLive = results.filter(r => r.status === 'fulfilled' && r.value).length >= 2
+  if (marketsLive) {
+    renderTicker()
+    renderMarket('marketRows')
+    renderMarket('catMarketRows')
+    if (document.getElementById('marketDetailContent')?.innerHTML) renderMarketDetail()
+  }
+  updateMarketStatus()
+}
+
+function updateMarketStatus() {
+  document.querySelectorAll('.mkt-live-flag').forEach(el => {
+    el.innerHTML = marketsLive
+      ? '<span class="live-dot"></span>Live'
+      : 'Sample data'
+    el.style.color = marketsLive ? '#16a34a' : 'var(--muted)'
+  })
+}
+
+function openArticle(id) {
+  const a = ARTICLES.find(x => x.id === id)
+  if (a?.url) window.open(a.url, '_blank', 'noopener')
+  else showToast(`Opening ${a?.source || 'source'}...`, 'info')
+}
+
 const MARKETS = [
   {sym:'SPY',name:'S&P 500 ETF',price:545.12,chg:1.24},
   {sym:'QQQ',name:'NASDAQ ETF',price:472.88,chg:1.83},
@@ -868,8 +1110,9 @@ function showPage(page, param, query) {
     pageEl.scrollIntoView ? window.scrollTo(0,0) : null
   }
 
-  // Highlight active nav link
-  const activeLink = document.querySelector(`.nav-link[data-page="${page}"]`)
+  // Highlight active nav link (category pages use the category slug)
+  const navKey = page === 'category' ? param : page
+  const activeLink = document.querySelector(`.nav-link[data-page="${navKey}"]`)
   if (activeLink) activeLink.classList.add('active')
 
   // Render page-specific content
@@ -903,6 +1146,8 @@ function renderTicker() {
    HOME PAGE
 ═══════════════════════════════════════════════════════════════════════ */
 function renderHome() {
+  homeShownCount = 8
+  updateFeedStatus()
   renderHero()
   renderAiStrip()
   renderCatPills('catRow', activeCatFilter)
@@ -920,13 +1165,13 @@ function renderHero() {
   document.getElementById('heroMain').innerHTML = `
     <div class="hero-eyebrow">Today's top story</div>
     <h1 class="hero-headline">${main.title.replace(/(AI|Record|Historic|Breakthrough|1 Million)/g,'<em>$1</em>')}</h1>
-    <p class="hero-summary">${main.summary}</p>
+    ${main.summary ? `<p class="hero-summary">${main.summary}</p>` : ''}
     <div class="hero-footer">
       <span class="hero-cat tag" style="background:${cat?.color};color:#fff">${cat?.label}</span>
       <span class="hero-source">${main.source} · ${main.time}</span>
       <span class="score-pill">★ ${main.score}/100</span>
     </div>
-    <span class="hero-read" onclick="showToast('Opening original source...','info')">
+    <span class="hero-read" onclick="openArticle('${main.id}')">
       <svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
       Read original source
     </span>
@@ -934,7 +1179,7 @@ function renderHero() {
 
   document.getElementById('heroStack').innerHTML = ARTICLES.slice(1,4).map(a => {
     const c = CATEGORIES.find(x => x.slug === a.category)
-    return `<div class="hero-card" onclick="showToast('Opening: ${a.source}','info')">
+    return `<div class="hero-card" onclick="openArticle('${a.id}')">
       <div class="hc-cat" style="color:${c?.color}">${c?.label}</div>
       <div class="hc-title">${a.title}</div>
       <div class="hc-meta">${a.source} · ${a.time} · ★ ${a.score}</div>
@@ -972,6 +1217,7 @@ function renderCatPills(containerId, activeVal) {
 
 function filterCat(slug) {
   activeCatFilter = slug
+  homeShownCount = 8
   renderCatPills('catRow', slug)
   renderArticleGrid('artGrid', slug, 0, 8)
 }
@@ -981,12 +1227,18 @@ function renderArticleGrid(containerId, catFilter, offset, limit) {
   if (!el) return
   const filtered = catFilter ? ARTICLES.filter(a => a.category === catFilter) : ARTICLES
   const slice = filtered.slice(offset, offset + limit)
-  el.innerHTML = slice.map((a, i) => renderArticleCard(a, i === 0 && !catFilter && offset === 0)).join('')
+  el.innerHTML = slice.length
+    ? slice.map((a, i) => renderArticleCard(a, i === 0 && !catFilter && offset === 0)).join('')
+    : `<div style="grid-column:1/-1;text-align:center;padding:48px 0;color:var(--muted)">
+        <div style="font-size:36px;margin-bottom:10px;opacity:.35">📰</div>
+        <div style="font-family:'Playfair Display',serif;font-weight:700;font-size:18px;color:var(--ink);margin-bottom:4px">No stories here yet</div>
+        <div style="font-size:13px">New stories arrive throughout the day — check back soon.</div>
+      </div>`
 }
 
 function renderArticleCard(a, featured) {
   const cat = CATEGORIES.find(c => c.slug === a.category)
-  return `<div class="art-card card-hover${featured?' wide':''}" onclick="showToast('Opening ${a.source}...','info')">
+  return `<div class="art-card card-hover${featured?' wide':''}" onclick="openArticle('${a.id}')">
     <div class="art-cat">
       <span class="tag" style="background:${cat?.bg};color:${cat?.color}">${cat?.label}</span>
       <span class="score-pill">★ ${a.score}</span>
@@ -1005,13 +1257,19 @@ function renderArticleCard(a, featured) {
   </div>`
 }
 
+let homeShownCount = 8
+
 function loadMoreArticles() {
-  showToast('Loading more stories...','info')
-  setTimeout(() => {
-    const grid = document.getElementById('artGrid')
-    grid.innerHTML += ARTICLES.slice(0,4).reverse().map(a => renderArticleCard(a, false)).join('')
-    showToast('4 more stories loaded','success')
-  }, 600)
+  const filtered = activeCatFilter ? ARTICLES.filter(a => a.category === activeCatFilter) : ARTICLES
+  const next = filtered.slice(homeShownCount, homeShownCount + 4)
+  if (next.length === 0) {
+    showToast('No more stories in this view','info')
+    return
+  }
+  const grid = document.getElementById('artGrid')
+  grid.innerHTML += next.map(a => renderArticleCard(a, false)).join('')
+  homeShownCount += next.length
+  showToast(`${next.length} more stor${next.length===1?'y':'ies'} loaded`,'success')
 }
 
 function renderMarket(containerId) {
@@ -1069,7 +1327,7 @@ function renderAcademyPromo() {
   const el = document.getElementById('pathRows')
   if (!el) return
   el.innerHTML = ACADEMY_PATHS.map(p => `
-    <div class="path-row" onclick="showPage('lesson',{path:p.id,slug:LESSONS[p.id]?.[0]?.slug||'what-is-investing'})">
+    <div class="path-row">
       <div class="path-icon" style="background:${p.bg};color:${p.color}">${p.emoji}</div>
       <div>
         <div class="path-label">${p.label}</div>
@@ -1079,8 +1337,7 @@ function renderAcademyPromo() {
     </div>
   `).join('')
 
-  // Fix onclick
-  document.querySelectorAll('.path-row').forEach((el, i) => {
+  el.querySelectorAll('.path-row').forEach((el, i) => {
     const p = ACADEMY_PATHS[i]
     el.onclick = () => {
       const first = LESSONS[p.id]?.[0]
@@ -1110,9 +1367,6 @@ function renderCategory(slug) {
 
   renderArticleGrid('catArtGrid', slug, 0, 12)
   renderMarket('catMarketRows')
-
-  // Update nav active state
-  document.querySelectorAll('.nav-link').forEach(el => el.classList.remove('active'))
 }
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -1209,7 +1463,10 @@ function renderLesson(params) {
   `
 }
 
+let currentQuiz = null
+
 function renderQuiz(quiz) {
+  currentQuiz = quiz
   const el = document.getElementById('quizCard')
   el.style.display = 'block'
   el.innerHTML = `
@@ -1226,7 +1483,7 @@ function renderQuiz(quiz) {
         <div class="q-explanation" id="exp-${qi}" style="display:none">💡 ${q.exp}</div>
       </div>
     `).join('')}
-    <button class="btn-primary quiz-submit" id="quizSubmitBtn" onclick="submitQuiz(${JSON.stringify(quiz).replace(/'/g,"\\'")})">Submit answers</button>
+    <button class="btn-primary quiz-submit" id="quizSubmitBtn" onclick="submitQuiz()">Submit answers</button>
     <div id="quizScore" style="display:none"></div>
   `
 }
@@ -1239,7 +1496,9 @@ function selectQuizOption(qi, oi) {
   document.getElementById(`opt-${qi}-${oi}`).classList.add('selected')
 }
 
-function submitQuiz(quiz) {
+function submitQuiz() {
+  const quiz = currentQuiz
+  if (!quiz) return
   if (Object.keys(quizAnswers).length < quiz.length) {
     showToast('Please answer all questions first','error')
     return
@@ -1433,7 +1692,7 @@ function doSearch() {
 
   el.innerHTML = `
     <div style="font-size:13px;color:var(--muted);margin-bottom:16px">${results.length} result${results.length!==1?'s':''} ${q?`for "<strong style="color:var(--ink)">${q}</strong>"`:''}</div>
-    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px">
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:14px">
       ${results.map(a => renderArticleCard(a, false)).join('') || '<div style="padding:40px;text-align:center;color:var(--muted)">No stories found. Try different keywords.</div>'}
     </div>
   `
@@ -1697,7 +1956,7 @@ function renderMarketDetail() {
     </div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
       <div class="card" style="padding:18px">
-        <div style="font-size:13px;font-weight:700;color:var(--ink);margin-bottom:12px">📅 Key Economic Events This Week</div>
+        <div style="font-size:13px;font-weight:700;color:var(--ink);margin-bottom:12px">📅 Typical Key Economic Events <span style="font-size:10px;font-weight:500;color:var(--muted)">(illustrative)</span></div>
         ${[
           {day:'Mon',event:'Fed Chair Powell Speech',impact:'High'},
           {day:'Tue',event:'CPI Inflation Report',impact:'High'},
@@ -1715,7 +1974,7 @@ function renderMarketDetail() {
         `).join('')}
       </div>
       <div class="card" style="padding:18px">
-        <div style="font-size:13px;font-weight:700;color:var(--ink);margin-bottom:12px">📊 Market Insights</div>
+        <div style="font-size:13px;font-weight:700;color:var(--ink);margin-bottom:12px">📊 Market Insights <span style="font-size:10px;font-weight:500;color:var(--muted)">(sample commentary)</span></div>
         ${[
           {icon:'📈',title:'S&P 500 at all-time highs',body:'Tech earnings beat expectations driving broad market gains.'},
           {icon:'💰',title:'Bitcoin breaks $71K resistance',body:'Institutional buying continues to support crypto markets.'},
@@ -2108,6 +2367,10 @@ document.addEventListener('DOMContentLoaded', () => {
   showPage('home')
   // Defer footer link wiring until after first render
   setTimeout(updateFooterLinks, 200)
+  // Fetch real headlines and market quotes in the background; the page
+  // stays usable with sample data until they arrive (or if unreachable)
+  loadLiveNews()
+  loadLiveMarkets()
 })
 </script>
 </body>
